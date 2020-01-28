@@ -125,8 +125,58 @@ impl Core {
         let notify_future = Arc::new(MyNotify::new(timer.unpark()));
         let notify_rx = Arc::new(MyNotify::new(timer.unpark()));
 
-        // New Tokio reactor + threadpool
+
         let rt = tokio::runtime::Runtime::new()?;
+
+        let timer_handle = timer.handle();
+
+        // Executor to run !Send futures
+        let executor = RefCell::new(CurrentThread::new_with_park(timer));
+
+        // Used to send messages across threads
+        let (tx, rx) = mpsc::unbounded();
+
+        // Wrap the rx half with a future context and refcell
+        let rx = RefCell::new(executor::spawn(rx));
+
+        let id = NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed);
+
+        Ok(Core {
+            id,
+            rt,
+            notify_future,
+            notify_rx,
+            tx,
+            rx,
+            executor,
+            timer_handle,
+            inner: Rc::new(RefCell::new(Inner {
+                pending_spawn: vec![],
+            })),
+        })
+    }
+
+    /// Creates a new event loop, returning any error that happened during the
+    /// creation.
+    pub fn new_single_threaded() -> io::Result<Core> {
+        // Create a new parker
+        let timer = Timer::new(ParkThread::new());
+
+        // Create notifiers
+        let notify_future = Arc::new(MyNotify::new(timer.unpark()));
+        let notify_rx = Arc::new(MyNotify::new(timer.unpark()));
+
+        // New Tokio reactor + threadpool
+        let rt = tokio::runtime::Builder::new()
+            .blocking_threads(1)
+            .clock(tokio_timer::clock::Clock::system())
+            .core_threads(1)
+            .keep_alive(None)
+            .name_prefix("single-threaded-core")
+            .stack_size(3* 1024 * 1024)
+            .build()
+
+            ?;
 
         let timer_handle = timer.handle();
 
@@ -169,6 +219,7 @@ impl Core {
             thread_pool: self.rt.executor().clone(),
         }
     }
+
 
     /// Returns a reference to the runtime backing the instance
     ///
